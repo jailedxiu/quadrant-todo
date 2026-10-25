@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>四象限待办 · Microsoft To Do</title>
+<!-- MSAL.js 2.x 官方 CDN（2.35.0 已验证可用）；若失败自动回退 jsDelivr -->
+<script src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"
+        onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';document.head.appendChild(s);"></script>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1d1f23;--muted:#6b7280;--border:#e3e5e9;--accent:#2563eb;--red:#dc2626;
+--q1:#fee2e2;--q2:#dbeafe;--q3:#fef3c7;--q4:#e5e7eb;}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--card:#1f2228;--fg:#e8eaed;--muted:#9aa0a6;--border:#30343b;--accent:#60a5fa;--red:#f87171;
+--q1:#3b1d1d;--q2:#1b2a40;--q3:#3a3016;--q4:#2a2d33;}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0;flex:1}
+button{font:inherit;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--fg);border-radius:6px;padding:4px 10px}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+input{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 6px}
+#user{color:var(--muted);font-size:14px}
+main{padding:12px 16px}
+.board{display:grid;grid-template-columns:28px 1fr 1fr;grid-template-rows:auto 1fr 1fr;gap:10px;min-height:calc(100vh - 90px)}
+.axis{color:var(--muted);font-size:13px;display:flex;align-items:center;justify-content:center}
+.axis.v{writing-mode:vertical-rl}
+.quad{border-radius:10px;padding:10px;display:flex;flex-direction:column;min-height:220px;border:2px solid transparent}
+.quad.over{border-color:var(--accent)}
+.quad h2{font-size:15px;margin:0 0 8px;display:flex;justify-content:space-between}
+.quad .count{color:var(--muted);font-weight:normal}
+.q1{background:var(--q1)}.q2{background:var(--q2)}.q3{background:var(--q3)}.q4{background:var(--q4)}
+.tasks{flex:1;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px 8px;display:flex;gap:8px;align-items:flex-start}
+.card[draggable=true]{cursor:grab}
+.card .body{flex:1;min-width:0}
+.card .title{word-break:break-word;outline:none}
+.card .title:focus{border-bottom:1px dashed var(--accent)}
+.card .meta{font-size:12px;color:var(--muted);margin-top:2px}
+.card .meta .overdue{color:var(--red);font-weight:600}
+.card .flag{color:var(--red)}
+.card .acts{display:flex;gap:2px}
+.card .acts button{padding:0 6px;border:none;background:none;color:var(--muted)}
+.card.pending{opacity:.55}
+.menu{position:absolute;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px #0003;z-index:20;display:flex;flex-direction:column}
+.menu button{border:none;text-align:left;padding:8px 14px}
+.add{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.add input[type=text]{flex:1;min-width:100px}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#333;color:#fff;padding:8px 16px;border-radius:8px;display:none;z-index:30}
+.setup{max-width:720px;margin:30px auto;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px 24px;line-height:1.7}
+.setup code{background:var(--bg);padding:1px 5px;border-radius:4px;word-break:break-all}
+.center{text-align:center;margin-top:60px}
+@media (max-width:700px){
+ .board{grid-template-columns:1fr;grid-template-rows:none}
+ .axis{display:none}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>四象限待办</h1>
+  <span id="user"></span>
+  <button id="refreshBtn" hidden>刷新</button>
+  <button id="signOutBtn" hidden>退出登录</button>
+</header>
+<main id="app"><p class="center">加载中…</p></main>
+<div id="toast"></div>
+
+<script>
+/* ======================= 配置 ======================= */
+const CLIENT_ID = 'YOUR_CLIENT_ID';          // ← 在此填入 Azure 应用(客户端) ID，或用 ?clientId=xxx 传入
+const AUTHORITY_TENANT = 'consumers';        // 个人账户用 'consumers'；同时支持工作/学校账户改为 'common'
+const SCOPES = ['Tasks.ReadWrite', 'User.Read'];
+const GRAPH = 'https://graph.microsoft.com/v1.0';
+const AUTO_REFRESH_MS = 24 * 60 * 60 * 1000; // 一天一次
+const QUADRANTS = [   // 顺序即网格顺序：左上、右上、左下、右下
+  { key: 'q1', name: '重要紧急' },
+  { key: 'q2', name: '重要不紧急' },
+  { key: 'q3', name: '紧急不重要' },
+  { key: 'q4', name: '不重要不紧急' },
+];
+
+/* ============ clientId 来源：URL 参数 > localStorage > 常量 ============ */
+function resolveClientId() {
+  const p = new URLSearchParams(location.search).get('clientId');
+  if (p) {
+    localStorage.setItem('quadrant.clientId', p.trim());
+    history.replaceState(null, '', location.origin + location.pathname + location.hash);
+  }
+  return localStorage.getItem('quadrant.clientId') || CLIENT_ID;
+}
+const clientId = resolveClientId();
+const redirectUri = location.origin + location.pathname;
+
+/* ======================= 工具函数 ======================= */
+const $ = (s, el = document) => el.querySelector(s);
+const app = $('#app');
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, '');
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) el.append(k);
+  return el;
+}
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = 'none', 4000);
+}
+
+/* ======================= 设置面板 ======================= */
+function showSetup() {
+  app.innerHTML = '';
+  const input = h('input', { type: 'text', placeholder: '粘贴应用程序(客户端) ID', style: 'width:100%;margin:8px 0' });
+  app.append(h('div', { class: 'setup' },
+    h('h2', {}, '首次使用：注册 Azure 应用'),
+    h('p', {}, '本页面通过 Microsoft Graph 读写你的 Microsoft To Do，需要一个属于你自己的应用注册（免费）：'),
+    h('ol', {},
+      h('li', {}, '打开 ', h('a', { href: 'https://portal.azure.com', target: '_blank' }, 'portal.azure.com'), '，用你的 Microsoft 账户登录。'),
+      h('li', {}, '进入 “Microsoft Entra ID” → “应用注册” → “新注册”。'),
+      h('li', {}, '名称随意；“受支持的帐户类型”选择 “仅限个人 Microsoft 帐户”（Personal Microsoft accounts only），或“任何组织目录中的帐户和个人 Microsoft 帐户”。'),
+      h('li', {}, '“重定向 URI”平台选择 “单页应用程序 (SPA)”，地址填写本页地址：', h('br'), h('code', {}, redirectUri)),
+      h('li', {}, '注册后在 “API 权限” → “添加权限” → Microsoft Graph → “委托的权限”，勾选 ', h('code', {}, 'Tasks.ReadWrite'), ' 和 ', h('code', {}, 'User.Read'), '。'),
+      h('li', {}, '回到 “概述”，复制 “应用程序(客户端) ID”，粘贴到下方。')),
+    input,
+    h('button', { class: 'primary', onclick: () => {
+      const v = input.value.trim(); if (!v) return toast('请先粘贴客户端 ID');
+      localStorage.setItem('quadrant.clientId', v); location.reload();
+    } }, '保存并登录'),
+    h('p', { style: 'color:var(--muted);font-size:13px' }, '也可以直接访问 ', h('code', {}, redirectUri + '?clientId=你的ID'), '，ID 会保存在本浏览器中。')));
+}
+
+/* ======================= 认证 ======================= */
+let msalApp, account;
+async function initAuth() {
+  msalApp = new msal.PublicClientApplication({
+    auth: { clientId, authority: 'https://login.microsoftonline.com/' + AUTHORITY_TENANT, redirectUri },
+    cache: { cacheLocation: 'localStorage' },
+  });
+  const res = await msalApp.handleRedirectPromise();
+  account = res?.account || msalApp.getAllAccounts()[0];
+  if (account) msalApp.setActiveAccount(account);
+}
+function login() { return msalApp.loginRedirect({ scopes: SCOPES }); }
+async function getToken() {
+  try {
+    return (await msalApp.acquireTokenSilent({ scopes: SCOPES, account })).accessToken;
+  } catch (e) {
+    if (e instanceof msal.InteractionRequiredAuthError || e.errorCode === 'no_tokens_found') {
+      await msalApp.acquireTokenRedirect({ scopes: SCOPES, account });
+      return new Promise(() => {}); // 页面将跳转
+    }
+    throw e;
+  }
+}
+
+/* ======================= Graph ======================= */
+async function graph(method, path, body) {
+  const token = await getToken();
+  const r = await fetch(path.startsWith('http') ? path : GRAPH + path, {
+    method,
+    headers: { Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    let msg = r.status + ' ' + r.statusText;
+    try { msg = (await r.json()).error?.message || msg; } catch {}
+    throw new Error(msg);
+  }
+  return r.status === 204 ? null : r.json();
+}
+async function getAll(path) {
+  let url = path, out = [];
+  while (url) { const d = await graph('GET', url); out.push(...d.value); url = d['@odata.nextLink']; }
+  return out;
+}
+
+/* ======================= 状态 ======================= */
+const state = { lists: {}, tasks: { q1: [], q2: [], q3: [], q4: [] } }; // lists: key -> listId
+let loading = false;
+
+async function ensureLists() {
+  const lists = await getAll('/me/todo/lists');
+  for (const q of QUADRANTS) {
+    let l = lists.find(x => x.displayName === q.name);
+    if (!l) l = await graph('POST', '/me/todo/lists', { displayName: q.name });
+    state.lists[q.key] = l.id;
+  }
+}
+async function loadTasks() {
+  if (loading) return; loading = true;
+  try {
+    const filter = encodeURIComponent("status ne 'completed'");
+    const results = await Promise.all(QUADRANTS.map(q =>
+      getAll(`/me/todo/lists/${state.lists[q.key]}/tasks?$filter=${filter}&$top=100`)));
+    QUADRANTS.forEach((q, i) => state.tasks[q.key] = results[i]);
+    render();
+  } catch (e) { toast('刷新失败：' + e.message); }
+  finally { loading = false; }
+}
+
+/* 乐观更新：先改本地并渲染，失败则回滚 */
+async function optimistic(mutate, remote, errLabel) {
+  const snapshot = JSON.parse(JSON.stringify(state.tasks));
+  mutate(); render();
+  try { await remote(); }
+  catch (e) { state.tasks = snapshot; render(); toast(errLabel + '失败：' + e.message); }
+}
+const findIdx = (k, id) => state.tasks[k].findIndex(t => t.id === id);
+const taskUrl = (k, id) => `/me/todo/lists/${state.lists[k]}/tasks/${id}`;
+
+function completeTask(k, task) {
+  optimistic(() => state.tasks[k].splice(findIdx(k, task.id), 1),
+    () => graph('PATCH', taskUrl(k, task.id), { status: 'completed' }), '完成任务');
+}
+function renameTask(k, task, title) {
+  if (!title || title === task.title) return render();
+  optimistic(() => state.tasks[k][findIdx(k, task.id)].title = title,
+    () => graph('PATCH', taskUrl(k, task.id), { title }), '修改标题');
+}
+function deleteTask(k, task) {
+  if (!confirm(`确定删除「${task.title}」？`)) return;
+  optimistic(() => state.tasks[k].splice(findIdx(k, task.id), 1),
+    () => graph('DELETE', taskUrl(k, task.id)), '删除任务');
+}
+function addTask(k, title, due) {
+  const body = { title };
+  if (due) body.dueDateTime = { dateTime: due + 'T00:00:00', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' };
+  const tmp = { ...body, id: 'tmp-' + Date.now(), importance: 'normal', _pending: true };
+  optimistic(() => state.tasks[k].unshift(tmp), async () => {
+    const created = await graph('POST', `/me/todo/lists/${state.lists[k]}/tasks`, body);
+    const i = findIdx(k, tmp.id); if (i >= 0) state.tasks[k][i] = created; render();
+  }, '添加任务');
+}
+/* Graph 不支持跨列表移动：在目标列表新建副本，再删除原任务 */
+function moveTask(from, to, task) {
+  if (from === to || task._pending) return;
+  const copy = { title: task.title, importance: task.importance };
+  for (const f of ['body', 'dueDateTime', 'reminderDateTime', 'isReminderOn', 'recurrence', 'startDateTime', 'categories'])
+    if (task[f] != null) copy[f] = task[f];
+  if (copy.body && !copy.body.content) delete copy.body;
+  const moved = { ...task, _pending: true };
+  optimistic(() => { state.tasks[from].splice(findIdx(from, task.id), 1); state.tasks[to].unshift(moved); }, async () => {
+    const created = await graph('POST', `/me/todo/lists/${state.lists[to]}/tasks`, copy);
+    const i = findIdx(to, task.id); if (i >= 0) state.tasks[to][i] = created; render();
+    try { await graph('DELETE', taskUrl(from, task.id)); }
+    catch (e) { toast('已复制到新象限，但删除原任务失败：' + e.message); loadTasks(); }
+  }, '移动任务');
+}
+
+/* ======================= 渲染 ======================= */
+function fmtDue(due) {
+  if (!due) return null;
+  const d = new Date(due.dateTime.slice(0, 10) + 'T00:00:00');
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return { text: `${d.getMonth() + 1}月${d.getDate()}日`, overdue: d < today };
+}
+let dragging = null;
+function closeMenu() { document.querySelectorAll('.menu').forEach(m => m.remove()); }
+function openMoveMenu(btn, k, task) {
+  closeMenu();
+  const r = btn.getBoundingClientRect();
+  const m = h('div', { class: 'menu', style: `top:${r.bottom + scrollY}px;left:${Math.max(4, r.right + scrollX - 140)}px` },
+    QUADRANTS.filter(q => q.key !== k).map(q =>
+      h('button', { onclick: () => { closeMenu(); moveTask(k, q.key, task); } }, '移到「' + q.name + '」')));
+  document.body.append(m);
+  setTimeout(() => document.addEventListener('click', closeMenu, { once: true }));
+}
+function renderCard(k, task) {
+  const due = fmtDue(task.dueDateTime);
+  const title = h('div', { class: 'title', contenteditable: task._pending ? false : 'plaintext-only', spellcheck: 'false',
+    onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } if (e.key === 'Escape') { e.target.textContent = task.title; e.target.blur(); } },
+    onblur: e => renameTask(k, task, e.target.textContent.trim()) }, task.title);
+  return h('div', { class: 'card' + (task._pending ? ' pending' : ''), draggable: task._pending ? 'false' : 'true',
+      ondragstart: e => { dragging = { k, task }; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', task.id); },
+      ondragend: () => dragging = null },
+    h('input', { type: 'checkbox', title: '完成', disabled: !!task._pending, onchange: () => completeTask(k, task) }),
+    h('div', { class: 'body' }, title,
+      (due || task.importance === 'high') ? h('div', { class: 'meta' },
+        task.importance === 'high' ? h('span', { class: 'flag', title: '重要' }, '★ ') : null,
+        due ? h('span', { class: due.overdue ? 'overdue' : '' }, (due.overdue ? '已逾期 · ' : '截止 ') + due.text) : null) : null),
+    h('div', { class: 'acts' },
+      h('button', { title: '移到…', onclick: e => { e.stopPropagation(); openMoveMenu(e.currentTarget, k, task); } }, '⇄'),
+      h('button', { title: '删除', onclick: () => deleteTask(k, task) }, '✕')));
+}
+function renderQuad(q) {
+  const text = h('input', { type: 'text', placeholder: '添加任务…' });
+  const date = h('input', { type: 'date', title: '截止日期（可选）' });
+  const submit = () => { const t = text.value.trim(); if (!t) return; addTask(q.key, t, date.value); };
+  text.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  const el = h('section', { class: 'quad ' + q.key, style: `grid-area:${{ q1: '2/2', q2: '2/3', q3: '3/2', q4: '3/3' }[q.key]}` },
+    h('h2', {}, q.name, h('span', { class: 'count' }, state.tasks[q.key].length + ' 项')),
+    h('div', { class: 'tasks' }, state.tasks[q.key].map(t => renderCard(q.key, t))),
+    h('div', { class: 'add' }, text, date, h('button', { onclick: submit }, '添加')));
+  el.addEventListener('dragover', e => { if (dragging) { e.preventDefault(); el.classList.add('over'); } });
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('over'); if (dragging) moveTask(dragging.k, q.key, dragging.task); });
+  return el;
+}
+function render() {
+  // 若用户正在编辑标题或输入新任务，避免自动刷新打断
+  const ae = document.activeElement;
+  if (ae && app.contains(ae) && (ae.isContentEditable || ae.tagName === 'INPUT') && loading) return;
+  app.innerHTML = '';
+  const board = h('div', { class: 'board' },
+    h('div', {}), h('div', { class: 'axis', style: 'grid-area:1/2/2/4' }, '← 紧急 · · · 不紧急 →'),
+    h('div', { class: 'axis v', style: 'grid-area:2/1/4/2' }, '← 重要 · · · 不重要 →'),
+    QUADRANTS.map(renderQuad));
+  app.append(board);
+  if (window.innerWidth <= 700) board.querySelectorAll('.quad').forEach(s => s.style.gridArea = 'auto');
+}
+
+/* ======================= 启动 ======================= */
+async function main() {
+  if (!clientId || clientId === 'YOUR_CLIENT_ID') return showSetup();
+  if (!window.msal) { app.innerHTML = '<p class="center">MSAL 库加载失败，请检查网络后刷新。</p>'; return; }
+  try { await initAuth(); }
+  catch (e) { app.innerHTML = ''; app.append(h('p', { class: 'center' }, '登录出错：' + e.message), h('p', { class: 'center' }, h('button', { onclick: () => { localStorage.removeItem('quadrant.clientId'); location.reload(); } }, '重新设置客户端 ID'))); return; }
+  if (!account) {
+    app.innerHTML = '';
+    app.append(h('div', { class: 'center' }, h('p', {}, '请使用 Microsoft 账户登录以同步 To Do。'), h('button', { class: 'primary', onclick: login }, '登录 Microsoft 账户')));
+    return;
+  }
+  $('#user').textContent = account.name || account.username;
+  $('#signOutBtn').hidden = $('#refreshBtn').hidden = false;
+  $('#signOutBtn').onclick = () => msalApp.logoutRedirect({ account, postLogoutRedirectUri: redirectUri });
+  $('#refreshBtn').onclick = loadTasks;
+  try { await ensureLists(); } catch (e) { app.innerHTML = '<p class="center">初始化列表失败：' + e.message + '</p>'; return; }
+  await loadTasks();
+  setInterval(loadTasks, AUTO_REFRESH_MS);
+  window.addEventListener('resize', () => { if (!document.activeElement || !app.contains(document.activeElement)) render(); });
+}
+window.addEventListener('load', main);
+</script>
+</body>
+</html>
