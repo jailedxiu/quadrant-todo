@@ -58,6 +58,14 @@ main{padding:6px 10px;flex:1;min-height:0;box-sizing:border-box;overflow:hidden;
  .quad{height:auto;min-height:160px;overflow:visible}
  .axis{display:none}
 }
+
+.ruler{margin:0 0 6px;padding:6px 8px;border:1px dashed var(--border);border-radius:8px;background:var(--card);font-size:12px;color:var(--muted);line-height:1.55;flex-shrink:0}
+.ruler strong{color:var(--fg)}
+.ruler summary{cursor:pointer;list-style:none;font-weight:600;color:var(--fg)}
+.ruler summary::-webkit-details-marker{display:none}
+.ruler[open]{max-height:40%;overflow:auto}
+.ruler ul{margin:4px 0 0;padding-left:1.1em}
+.ruler li{margin:2px 0}
 </style>
 </head>
 <body>
@@ -309,11 +317,22 @@ function render() {
   const ae = document.activeElement;
   if (ae && app.contains(ae) && (ae.isContentEditable || ae.tagName === 'INPUT') && loading) return;
   app.innerHTML = '';
+  const ruler = h('details', { class: 'ruler' },
+    h('summary', {}, '归类尺子（点开）'),
+    h('div', {},
+      h('p', {}, h('strong', {}, '两问：'), '①不做会伤钱/岗/口碑/健康/长期技能吗 → 重要；②有硬截止或再拖会出事吗 → 紧急。'),
+      h('p', {}, h('strong', {}, '重要 ≠ 学校整类不重要。'), '学校先拆再归类：开课质量、班主任底线、考核/工资硬节点算重要；可代劳可拒的琐事才进不重要。'),
+      h('ul', {},
+        h('li', {}, h('strong', {}, '重要紧急：'), '立刻做完，尽量清空（明天要上的课、临近截稿、催收逾期）。'),
+        h('li', {}, h('strong', {}, '重要不紧急：'), '主战场，预约进日历（申论讲义、论文/投稿、考证、健身、公众号）。'),
+        h('li', {}, h('strong', {}, '紧急不重要：'), '委托/缩短/批量，不占黄金时间。'),
+        h('li', {}, h('strong', {}, '不重要不紧急：'), '删或闲时；默认不碰。')),
+      h('p', {}, h('strong', {}, '口诀：'), '上午啃重要不紧急；中午下午清重要紧急；碎片处理紧急不重要；第四格闲时。日历管几点做，四象限管该不该做。')));
   const board = h('div', { class: 'board' },
     h('div', {}), h('div', { class: 'axis', style: 'grid-area:1/2/2/4' }, '← 紧急 · · · 不紧急 →'),
     h('div', { class: 'axis v', style: 'grid-area:2/1/4/2' }, '← 重要 · · · 不重要 →'),
     QUADRANTS.map(renderQuad));
-  app.append(board);
+  app.append(ruler, board);
   if (window.innerWidth <= 700) board.querySelectorAll('.quad').forEach(s => s.style.gridArea = 'auto');
 }
 
