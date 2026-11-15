@@ -1,0 +1,30 @@
+name: Promote due-soon tasks
+
+on:
+  schedule:
+    # 07:00 Asia/Shanghai
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List matching tasks but do not move them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Promote tasks due in fewer than 5 days
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+        run: python scripts/promote_due_soon.py
