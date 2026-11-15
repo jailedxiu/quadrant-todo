@@ -91,6 +91,8 @@ const QUADRANTS = [   // 顺序即网格顺序：左上、右上、左下、右�
   { key: 'q3', name: '紧急不重要' },
   { key: 'q4', name: '不重要不紧急' },
 ];
+const DUE_SOON_DAYS = 5; // 距离截止日期不足 5 天（含今天与已过期）转入紧急
+const PROMOTE = { q2: 'q1', q4: 'q3' }; // 重要不紧急→重要紧急，不重要不紧急→紧急不重要
 
 /* ============ clientId 来源：URL 参数 > localStorage > 常量 ============ */
 function resolveClientId() {
@@ -209,7 +211,10 @@ async function loadTasks() {
     const results = await Promise.all(QUADRANTS.map(q =>
       getAll(`/me/todo/lists/${state.lists[q.key]}/tasks?$filter=${filter}&$top=100`)));
     QUADRANTS.forEach((q, i) => state.tasks[q.key] = results[i]);
+    const moved = await promoteDueSoonTasks();
+    sortAllTasks();
     render();
+    if (moved.length) toast('已将 ' + moved.length + ' 项因截止不足' + DUE_SOON_DAYS + '天转入紧急');
   } catch (e) { toast('刷新失败：' + e.message); }
   finally { loading = false; }
 }
@@ -247,20 +252,101 @@ function addTask(k, title, due) {
     const i = findIdx(k, tmp.id); if (i >= 0) state.tasks[k][i] = created; render();
   }, '添加任务');
 }
-/* Graph 不支持跨列表移动：在目标列表新建副本，再删除原任务 */
-function moveTask(from, to, task) {
-  if (from === to || task._pending) return;
+/* Graph 不支持跨列表移动：在目标列表新建副本，再删除原任务。尽量复制清单与链接资源；附件无法保留。 */
+function taskCopyPayload(task) {
   const copy = { title: task.title, importance: task.importance };
   for (const f of ['body', 'dueDateTime', 'reminderDateTime', 'isReminderOn', 'recurrence', 'startDateTime', 'categories'])
     if (task[f] != null) copy[f] = task[f];
   if (copy.body && !copy.body.content) delete copy.body;
+  return copy;
+}
+async function copySubitems(fromKey, fromId, toKey, toId, task) {
+  let items = task.checklistItems;
+  if (!items) {
+    try { items = (await graph('GET', taskUrl(fromKey, fromId) + '/checklistItems')).value || []; }
+    catch { items = []; }
+  }
+  for (const it of items) {
+    await graph('POST', `/me/todo/lists/${state.lists[toKey]}/tasks/${toId}/checklistItems`, {
+      displayName: it.displayName, isChecked: !!it.isChecked,
+    });
+  }
+  let links = task.linkedResources;
+  if (!links) {
+    try { links = (await graph('GET', taskUrl(fromKey, fromId) + '/linkedResources')).value || []; }
+    catch { links = []; }
+  }
+  for (const lr of links) {
+    const body = {};
+    for (const f of ['webUrl', 'applicationName', 'displayName', 'externalId'])
+      if (lr[f] != null) body[f] = lr[f];
+    if (Object.keys(body).length) {
+      try { await graph('POST', `/me/todo/lists/${state.lists[toKey]}/tasks/${toId}/linkedResources`, body); }
+      catch {}
+    }
+  }
+}
+async function transferTask(from, to, task) {
+  const created = await graph('POST', `/me/todo/lists/${state.lists[to]}/tasks`, taskCopyPayload(task));
+  try { await copySubitems(from, task.id, to, created.id, task); }
+  catch (e) { toast('已转到新象限，但清单复制未完成：' + e.message); }
+  try { await graph('DELETE', taskUrl(from, task.id)); }
+  catch (e) { toast('已复制到新象限，但删除原任务失败：' + e.message); throw e; }
+  return created;
+}
+function moveTask(from, to, task) {
+  if (from === to || task._pending) return;
   const moved = { ...task, _pending: true };
-  optimistic(() => { state.tasks[from].splice(findIdx(from, task.id), 1); state.tasks[to].unshift(moved); }, async () => {
-    const created = await graph('POST', `/me/todo/lists/${state.lists[to]}/tasks`, copy);
-    const i = findIdx(to, task.id); if (i >= 0) state.tasks[to][i] = created; render();
-    try { await graph('DELETE', taskUrl(from, task.id)); }
-    catch (e) { toast('已复制到新象限，但删除原任务失败：' + e.message); loadTasks(); }
+  optimistic(() => {
+    state.tasks[from].splice(findIdx(from, task.id), 1);
+    state.tasks[to].unshift(moved);
+    sortAllTasks();
+  }, async () => {
+    const created = await transferTask(from, to, task);
+    const i = findIdx(to, task.id); if (i >= 0) state.tasks[to][i] = created;
+    sortAllTasks();
+    render();
   }, '移动任务');
+}
+function dueDay(due) {
+  if (!due || !due.dateTime) return null;
+  return due.dateTime.slice(0, 10);
+}
+function isDueSoon(due) {
+  const day = dueDay(due);
+  if (!day) return false;
+  const d = new Date(day + 'T00:00:00');
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return (d - today) / 86400000 < DUE_SOON_DAYS;
+}
+function sortAllTasks() {
+  for (const q of QUADRANTS) {
+    state.tasks[q.key].sort((a, b) => {
+      const da = dueDay(a.dueDateTime), db = dueDay(b.dueDateTime);
+      if (da === db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return da < db ? -1 : 1;
+    });
+  }
+}
+async function promoteDueSoonTasks() {
+  const moved = [];
+  for (const [from, to] of Object.entries(PROMOTE)) {
+    const due = state.tasks[from].filter(t => !t._pending && isDueSoon(t.dueDateTime));
+    for (const task of due) {
+      try {
+        const created = await transferTask(from, to, task);
+        const i = findIdx(from, task.id);
+        if (i >= 0) state.tasks[from].splice(i, 1);
+        state.tasks[to].push(created);
+        moved.push(task.title);
+      } catch (e) {
+        toast('自动转入紧急失败「' + task.title + '」：' + e.message);
+      }
+    }
+  }
+  return moved;
 }
 
 /* ======================= 渲染 ======================= */
